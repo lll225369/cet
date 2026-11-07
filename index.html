@@ -46,6 +46,7 @@ main{max-width:780px;margin:0 auto;padding:12px 12px calc(40px + env(safe-area-i
 .btn:hover{background:#f7f8fc}
 .btn.primary{background:#4a6cf7;border-color:#4a6cf7;color:#fff}
 .btn.primary:hover{background:#3a56d4}
+.btn.success{background:#0f7b52;border-color:#0f7b52;color:#fff}
 .btn.danger{color:#e5484d;border-color:#f5c6c8}
 .btn.mini{padding:7px 12px;font-size:13px;min-height:36px;margin:0;border-radius:8px}
 .btn.big-btn{display:block;width:100%;padding:15px;font-size:16px;margin:10px 0 0;text-align:center}
@@ -166,8 +167,6 @@ const DAY = 86400000;
 const INTERVALS   = [0, 1, 2, 4, 7, 15, 30, 60, 120];
 const STAGE_LABEL = ['新词','1天','2天','4天','7天','15天','30天','60天','已掌握'];
 
-/* 每次选择题复习的词数，想改每天量就改这里 */
-const DAILY_LIMIT = 20;
 /* 文章模式用多少个词 */
 const ARTICLE_LIMIT = 16;
 
@@ -181,7 +180,7 @@ function esc(s){
 function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/* 本地存储可用性检测（iOS 无痕 / 部分 App 内置浏览器会失败） */
+/* 本地存储可用性检测 */
 let storageOK = true;
 try{ localStorage.setItem('__probe__','1'); localStorage.removeItem('__probe__'); }
 catch(e){ storageOK = false; }
@@ -236,46 +235,35 @@ $$('.tab').forEach(t => {
 function reviewWord(word, ok){
   const w = S.words[word]; if(!w) return;
   if(ok){ w.stage = Math.min(w.stage + 1, 8); w.correct = (w.correct||0) + 1; }
-  else  { w.stage = Math.max(0, w.stage - 2); w.wrong   = (w.wrong||0) + 1; }
+  else  { w.stage = 0; w.wrong = (w.wrong||0) + 1; } // 答错重置为0，明天重来
   w.nextReview    = Date.now() + INTERVALS[w.stage] * DAY;
   w.lastReviewDay = todayStr();
   save();
 }
 
-/* 文章模式：每个词每天只调整一次阶段，避免同一篇里多次扣分 */
+/* 文章模式逻辑 */
 function applyArticleResult(word, ok){
   const w = S.words[word]; if(!w) return;
   if(ok) w.correct = (w.correct||0) + 1;
   else   w.wrong   = (w.wrong||0) + 1;
 
   if(w.lastReviewDay !== todayStr()){
-    w.stage = ok ? Math.min(w.stage + 1, 8) : Math.max(0, w.stage - 2);
+    w.stage = ok ? Math.min(w.stage + 1, 8) : 0;
     w.lastReviewDay = todayStr();
-  }else if(!ok){
-    w.stage = Math.max(0, w.stage - 1);
   }
   w.nextReview = Date.now() + INTERVALS[w.stage] * DAY;
   save();
 }
 
-/* 今日待复习（选择题用）：旧词优先，再补新词 */
-function pickWords(limit){
+/* 今日待复习（按顺序提取全部到期单词） */
+function getDueWords(){
   const now = Date.now(), today = todayStr();
-  const due = Object.values(S.words).filter(w => w.nextReview <= now && w.lastReviewDay !== today);
-  const oldOnes = due.filter(w => w.stage > 0).sort((a,b) => a.nextReview - b.nextReview);
-  const newOnes = due.filter(w => w.stage === 0).sort((a,b) => (a.addedAt||0) - (b.addedAt||0));
-
-  const res = [];
-  const oldQuota = Math.min(oldOnes.length, Math.ceil(limit * 0.65));
-  res.push(...oldOnes.slice(0, oldQuota));
-  res.push(...newOnes.slice(0, Math.max(0, limit - res.length)));
-  if(res.length < limit){
-    res.push(...oldOnes.slice(oldQuota, oldQuota + (limit - res.length)));
-  }
-  return res.map(w => w.word);
+  return Object.values(S.words)
+    .filter(w => w.nextReview <= now && w.lastReviewDay !== today)
+    .sort((a,b) => a.nextReview - b.nextReview || a.stage - b.stage)
+    .map(w => w.word);
 }
 
-/* 文章选词：到期的 + 最近 5 天新增的，越不熟越靠前 */
 function pickArticleWords(limit){
   const now = Date.now();
   const map = new Map();
@@ -294,15 +282,13 @@ function pickArticleWords(limit){
 function renderHome(){
   const now = Date.now(), today = todayStr();
   const all = Object.values(S.words);
-  const dueOld = all.filter(w => w.stage > 0 && w.nextReview <= now && w.lastReviewDay !== today);
-  const dueNew = all.filter(w => w.stage === 0 && w.lastReviewDay !== today);
-  const mastered = all.filter(w => w.stage >= 8);
-  const total = dueOld.length + dueNew.length;
+  const dueWords = getDueWords();
+  const total = dueWords.length;
 
   $('#view-home').innerHTML = `
     ${storageOK ? '' : `<div class="card warn">
       <b class="bad-text">⚠ 当前浏览器无法保存数据</b>
-      <p class="muted" style="margin:6px 0 0">可能是无痕模式或 App 内置浏览器。请用 Safari / Chrome 打开，否则关闭页面后单词和进度会丢失。</p>
+      <p class="muted" style="margin:6px 0 0">请用 Safari 或 Chrome 打开，否则关闭页面后单词和进度会丢失。</p>
     </div>`}
 
     <div class="card">
@@ -310,41 +296,45 @@ function renderHome(){
       <div class="muted">今日待复习</div>
       <div class="mini-row">
         <span>词库 <b>${all.length}</b></span>
-        <span>旧词 <b>${dueOld.length}</b></span>
-        <span>新词 <b>${dueNew.length}</b></span>
-        <span>已掌握 <b>${mastered.length}</b></span>
+        <span>已掌握 <b>${all.filter(w => w.stage >= 8).length}</b></span>
       </div>
     </div>
 
     <div class="card">
       <h3>开始复习</h3>
-      <p class="muted" style="margin:0 0 6px">记忆曲线：新词 → 1天 → 2天 → 4天 → 7天 → 15天 → 30天 → 60天 → 已掌握</p>
-      <button class="btn primary big-btn" onclick="startQuiz()">📝 选择题复习</button>
-      <button class="btn big-btn" onclick="startArticle()">📖 文章填空复习</button>
+      <p class="muted" style="margin:0 0 10px">记忆曲线：新词 → 1天 → 2天 → 4天 → 7天 → 15天 → 30天 → 60天 → 已掌握</p>
+      
+      ${total > 0 ? `
+        ${total > 20 ? `<button class="btn primary big-btn" onclick="startQuiz('all')">📝 复习全部 (${total}个)</button>` : ''}
+        <button class="btn ${total > 20 ? '' : 'primary'} big-btn" onclick="startQuiz(20)">⚡ 快速复习 20 个</button>
+        <button class="btn big-btn" onclick="startArticle()">📖 文章填空复习</button>
+      ` : `
+        <div class="center" style="padding:20px 0">
+          <div style="font-size:36px;margin-bottom:10px">🎉</div>
+          <div style="font-weight:600">今日任务已完成</div>
+          <div class="muted" style="margin-top:4px">明天再来巩固记忆吧</div>
+        </div>
+        <button class="btn" onclick="startArticle()" style="width:100%">📖 随机生成文章阅读</button>
+      `}
     </div>
-
-    ${all.length === 0 ? `<div class="card muted center">还没有单词，点上方「导入」添加吧 👆</div>` : ''}
   `;
 }
 
 /* ============================================================
-   导入
+   导入与智能解析
 ============================================================ */
 function renderImport(){
   $('#view-import').innerHTML = `
     <div class="card">
       <h3>导入单词</h3>
-      <p class="muted">每行一个。支持「单词 释义」，分隔符可用 Tab、逗号、冒号、竖线或两个以上空格；<br>
-      也可以只写单词，系统会自动联网翻译（导入后也能手动改）。</p>
-      <textarea id="impText" class="ta" rows="9"
-        placeholder="abandon&#10;abandon 放弃&#10;abandon,放弃，遗弃&#10;abandon:放弃&#10;abandon	放弃"></textarea>
+      <p class="muted">每行一个单词，支持逗号、冒号、空格分隔。<br>
+      系统已经升级为智能解析，直接粘贴即可。</p>
+      <textarea id="impText" class="ta" rows="10"
+        placeholder="abandon,放弃&#10;abandon 放弃&#10;abandon:放弃"></textarea>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px">
-        <button class="btn primary" id="parseBtn" style="margin:0">解析</button>
+        <button class="btn primary" id="parseBtn" style="margin:0">解析并预览</button>
         <button class="btn" id="pasteBtn" style="margin:0">从剪贴板粘贴</button>
       </div>
-      <label style="margin-top:14px">
-        <input type="checkbox" id="autoTrans" checked> 自动翻译缺少释义的单词
-      </label>
     </div>
     <div id="impPreview"></div>
   `;
@@ -365,9 +355,13 @@ function renderImport(){
 
 function parseLine(line){
   line = line.trim();
-  if(!line || line.startsWith('#')) return null;
-  const m = line.match(/^([A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*)*)\s*(?:[\t:：,，|]|\s-\s|\s{2,})\s*(.+)$/);
+  if(!line || line.startsWith('#') || line.startsWith('```')) return null;
+  
+  // 智能识别：英文单词（可能带空格），跟着空格或符号，然后是中文或解释
+  const m = line.match(/^([a-zA-Z][a-zA-Z\s'’\-]*?)[\s,，:：\t]+([^a-zA-Z].*)$/);
   if(m) return { word: m[1].trim().toLowerCase(), meaning: m[2].trim() };
+
+  // 纯英文单词（没有中文，需自己填或自动翻译）
   if(/^[A-Za-z][A-Za-z'’\-]*(?:\s+[A-Za-z][A-Za-z'’\-]*)*$/.test(line))
     return { word: line.toLowerCase(), meaning: '' };
   return null;
@@ -380,50 +374,9 @@ async function doParse(){
     const p = parseLine(line);
     if(p && !seen.has(p.word)){ seen.add(p.word); parsed.push(p); }
   });
-  if(!parsed.length){ alert('没有解析到单词，检查一下格式吧'); return; }
+  if(!parsed.length){ alert('没有解析到单词，请检查是不是混入了大量符号或特殊字符'); return; }
 
   renderPreview(parsed);
-  if($('#autoTrans').checked && parsed.some(p => !p.meaning)){
-    await autoTranslate(parsed);
-  }
-}
-
-async function autoTranslate(parsed){
-  const need = parsed.filter(p => !p.meaning);
-  for(let i = 0; i < need.length; i++){
-    setStatus(`翻译中 ${i+1}/${need.length}：${need[i].word}`);
-    const t = await translateWord(need[i].word);
-    if(t){
-      need[i].meaning = t;
-      const idx = parsed.indexOf(need[i]);
-      const inp = document.querySelector(`#impPreview input[data-i="${idx}"]`);
-      if(inp) inp.value = t;
-    }
-    await sleep(180);
-  }
-  setStatus('');
-}
-function setStatus(s){
-  const el = $('#impStatus');
-  if(el) el.textContent = s ? '· ' + s : '';
-}
-
-const TR_CACHE = 'cet6_tr_cache';
-async function translateWord(word){
-  let cache = {};
-  try{ cache = JSON.parse(localStorage.getItem(TR_CACHE) || '{}'); }catch(e){}
-  if(cache[word]) return cache[word];
-  try{
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|zh-CN`;
-    const r = await fetch(url);
-    const j = await r.json();
-    let t = ((j && j.responseData && j.responseData.translatedText) || '').trim();
-    if(!t || !/[\u4e00-\u9fa5]/.test(t)) return '';
-    t = t.replace(/\s+/g, ' ');
-    cache[word] = t;
-    localStorage.setItem(TR_CACHE, JSON.stringify(cache));
-    return t;
-  }catch(e){ return ''; }
 }
 
 function renderPreview(parsed){
@@ -435,178 +388,58 @@ function renderPreview(parsed){
 
   $('#impPreview').innerHTML = `
     <div class="card">
-      <h3>预览 <span class="muted" id="impStatus"></span></h3>
-      <p class="muted">自动翻译可能不准确，可以直接修改。</p>
+      <h3>预览确认</h3>
       <table class="tbl">
         <thead><tr><th>单词</th><th>释义</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <button class="btn primary" id="confirmImp" style="margin:0">确认导入 ${parsed.length} 个</button>
+      <button class="btn primary" id="confirmImp" style="margin:0">确认导入 (${parsed.length}个)</button>
     </div>`;
 
   $('#confirmImp').onclick = () => {
-    let added = 0, updated = 0, skipped = 0;
+    let added = 0, skipped = 0;
     $$('#impPreview input.inp').forEach(inp => {
       const p = parsed[+inp.dataset.i];
       const meaning = inp.value.trim();
       if(!meaning){ skipped++; return; }
+      
       if(S.words[p.word]){
-        if(S.words[p.word].meaning !== meaning){ S.words[p.word].meaning = meaning; updated++; }
-        else skipped++;
+        S.words[p.word].meaning = meaning; // 覆盖旧释义
       }else{
         S.words[p.word] = {
           word: p.word, meaning,
-          stage: 0, nextReview: Date.now(), addedAt: Date.now(),
+          stage: 0, nextReview: Date.now(), addedAt: Date.now(), // nextReview=当前时间，意味着马上可以复习
           correct: 0, wrong: 0, lastReviewDay: null
         };
         added++;
       }
     });
     save();
-    alert(`新增 ${added} 个${updated ? `，更新释义 ${updated} 个` : ''}${skipped ? `，跳过 ${skipped} 个` : ''}`);
+    alert(`成功导入 ${added} 个单词${skipped ? `，跳过 ${skipped} 个无释义单词` : ''}`);
     showView('home');
     renderHome();
   };
 }
 
 /* ============================================================
-   词库
-============================================================ */
-function renderLib(){
-  const all = Object.values(S.words).sort((a,b) => (b.addedAt||0) - (a.addedAt||0));
-  if(!all.length){
-    $('#view-lib').innerHTML = `<div class="card muted center">词库是空的</div>`;
-    return;
-  }
-  const rows = all.map(w => {
-    const nextTxt = w.stage >= 8 ? '已掌握' : new Date(w.nextReview).toLocaleDateString('zh-CN');
-    return `<div class="li-row">
-      <div class="w">${esc(w.word)}</div>
-      <div class="m">${esc(w.meaning)}</div>
-      <span class="tag ${w.stage >= 8 ? 'master' : ''}">${STAGE_LABEL[w.stage]}</span>
-      <span class="next">${nextTxt}</span>
-      <button class="x" data-del="${esc(w.word)}" title="删除">×</button>
-    </div>`;
-  }).join('');
-
-  $('#view-lib').innerHTML = `<div class="card">
-      <h3>词库（${all.length}）</h3>
-      <p class="muted">阶段 = 记忆曲线进度；右侧为下次复习日期。</p>
-      ${rows}
-    </div>`;
-
-  $$('#view-lib .x').forEach(b => {
-    b.onclick = () => {
-      if(confirm('删除 ' + b.dataset.del + ' ?')){
-        delete S.words[b.dataset.del];
-        save();
-        renderLib();
-      }
-    };
-  });
-}
-
-/* ============================================================
-   设置
-============================================================ */
-function renderSettings(){
-  $('#view-settings').innerHTML = `
-    <div class="card">
-      <h3>AI 文章生成（可选）</h3>
-      <p class="muted">填入任意 OpenAI 兼容接口的 Key 后可一键生成文章。<br>
-      不填也能用：系统会给你一段提示词，复制到 DeepSeek / ChatGPT / 豆包 / Kimi，再把返回的 JSON 粘回来即可。</p>
-      <label>API Base</label>
-      <input class="inp" id="sBase" value="${esc(S.settings.apiBase)}">
-      <label>API Key</label>
-      <input class="inp" id="sKey" type="password" value="${esc(S.settings.apiKey)}" placeholder="sk-...">
-      <label>模型</label>
-      <input class="inp" id="sModel" value="${esc(S.settings.model)}" placeholder="deepseek-chat">
-      <button class="btn primary" id="saveSet" style="margin-top:14px">保存</button>
-      <p class="muted" style="margin-top:10px">Key 只存在你自己手机浏览器里，不会上传到 GitHub，别人看不到。</p>
-    </div>
-
-    <div class="card">
-      <h3>数据备份</h3>
-      <p class="muted">换手机或清缓存前记得备份。</p>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
-        <button class="btn" id="exportBtn" style="margin:0">下载备份</button>
-        <button class="btn" id="copyBackup" style="margin:0">复制备份</button>
-        <button class="btn" id="importBtn" style="margin:0">恢复备份</button>
-      </div>
-      <button class="btn danger" id="clearBtn" style="margin-top:12px">清空全部数据</button>
-      <input type="file" id="fileIn" accept="application/json" style="display:none">
-    </div>`;
-
-  $('#saveSet').onclick = () => {
-    S.settings.apiBase = $('#sBase').value.trim() || 'https://api.deepseek.com/v1';
-    S.settings.apiKey  = $('#sKey').value.trim();
-    S.settings.model   = $('#sModel').value.trim() || 'deepseek-chat';
-    save();
-    $('#saveSet').textContent = '已保存 ✓';
-    setTimeout(() => $('#saveSet').textContent = '保存', 1500);
-  };
-
-  $('#exportBtn').onclick = () => {
-    const blob = new Blob([JSON.stringify(S, null, 2)], { type:'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'cet6-words-' + todayStr() + '.json';
-    a.click();
-  };
-
-  $('#copyBackup').onclick = async () => {
-    try{
-      await navigator.clipboard.writeText(JSON.stringify(S));
-      alert('备份内容已复制，粘贴到备忘录或发给自己保存');
-    }catch(e){
-      alert('复制失败，请改用「下载备份」');
-    }
-  };
-
-  $('#importBtn').onclick = () => $('#fileIn').click();
-
-  $('#fileIn').onchange = e => {
-    const f = e.target.files[0];
-    if(!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try{
-        const o = JSON.parse(r.result);
-        if(o.words){
-          S.words = o.words;
-          S.settings = Object.assign(S.settings, o.settings || {});
-          save();
-          alert('恢复成功');
-          renderSettings();
-        }else{
-          alert('文件格式不对');
-        }
-      }catch(err){ alert('解析失败'); }
-    };
-    r.readAsText(f);
-  };
-
-  $('#clearBtn').onclick = () => {
-    if(confirm('确定清空所有单词和进度？此操作不可恢复')){
-      try{
-        localStorage.removeItem(DB_KEY);
-        localStorage.removeItem(TR_CACHE);
-      }catch(e){}
-      location.reload();
-    }
-  };
-}
-
-/* ============================================================
-   选择题复习
+   选择题复习（百词斩错词循环模式）
 ============================================================ */
 let quiz = null;
 const FILLER_MEANINGS = ['显著的','推测','阻碍','消耗','仁慈的','模糊的','谨慎的','丰富的','矛盾','促进'];
 
-function startQuiz(){
-  const words = pickWords(DAILY_LIMIT);
-  if(!words.length){ alert('今天没有需要复习的单词，先去导入一些吧～'); return; }
-  quiz = { queue: words, idx: 0, right: 0, wrong: 0 };
+function startQuiz(limit){
+  const dueWords = getDueWords();
+  if(!dueWords.length){ alert('今天没有需要复习的单词'); return; }
+  
+  const words = limit === 'all' ? dueWords : dueWords.slice(0, limit);
+  
+  quiz = { 
+    queue: [...words], 
+    originalTotal: words.length,
+    idx: 0, 
+    right: 0, 
+    wrong: 0 
+  };
   showView('quiz');
   renderQuiz();
 }
@@ -638,11 +471,14 @@ function renderQuiz(){
 
   if(!quiz || quiz.idx >= quiz.queue.length){
     const right = quiz ? quiz.right : 0;
-    const total = quiz ? quiz.queue.length : 0;
+    const total = quiz ? quiz.originalTotal : 0;
+    const extra = quiz ? quiz.queue.length - quiz.originalTotal : 0;
     el.innerHTML = `<div class="card center">
-        <h2>本轮完成 🎉</h2>
-        <p>答对 <b class="ok-text">${right}</b> / 共 ${total}</p>
-        <button class="btn primary" style="margin-top:14px" onclick="endQuiz()">返回首页</button>
+        <div style="font-size:40px;margin-bottom:10px">🎉</div>
+        <h2>本轮完成</h2>
+        <p>今天记住了 <b class="ok-text">${total}</b> 个单词</p>
+        ${extra > 0 ? `<p class="muted">（纠正错词 ${extra} 次）</p>` : ''}
+        <button class="btn primary" style="margin-top:20px" onclick="endQuiz()">返回首页</button>
       </div>`;
     return;
   }
@@ -651,10 +487,13 @@ function renderQuiz(){
   const w = S.words[word];
   const opts = makeOptions(w);
 
+  // 进度条基于最初的总词数，哪怕错词加了进来，进度条也不会倒流
+  const progress = Math.min(100, (quiz.idx / quiz.originalTotal) * 100);
+
   el.innerHTML = `
     <div class="quiz-top">
       <span class="muted">${quiz.idx + 1} / ${quiz.queue.length}</span>
-      <div class="bar"><i style="width:${quiz.idx / quiz.queue.length * 100}%"></i></div>
+      <div class="bar"><i style="width:${progress}%"></i></div>
       <button class="btn mini" onclick="endQuiz()">结束</button>
     </div>
     <div class="card center">
@@ -679,18 +518,23 @@ function answerQuiz(btn, word, correct){
   });
   if(!ok) btn.classList.add('bad');
 
-  if(ok) quiz.right++; else quiz.wrong++;
-  reviewWord(word, ok);
-
-  $('#quizFeedback').innerHTML = ok
-    ? `<span class="ok-text">✓ 正确</span>`
-    : `<span class="bad-text">✗ 正确答案：${esc(correct)}</span>`;
-
-  setTimeout(() => { quiz.idx++; renderQuiz(); }, ok ? 550 : 1600);
+  if(ok) {
+    quiz.right++;
+    reviewWord(word, true);
+    $('#quizFeedback').innerHTML = `<span class="ok-text">✓ 正确</span>`;
+    setTimeout(() => { quiz.idx++; renderQuiz(); }, 500);
+  } else {
+    quiz.wrong++;
+    reviewWord(word, false); // 记录错误，阶段归0
+    quiz.queue.push(word);   // 【核心逻辑】错词重新塞回本轮末尾！
+    
+    $('#quizFeedback').innerHTML = `<span class="bad-text">✗ 正确答案：${esc(correct)}</span><br><span class="muted">马上会再出现一次</span>`;
+    setTimeout(() => { quiz.idx++; renderQuiz(); }, 1800);
+  }
 }
 
 /* ============================================================
-   文章填空复习
+   文章填空复习（保持不变）
 ============================================================ */
 let currentArticleWords = [];
 
@@ -746,7 +590,6 @@ function renderArticleStart(words){
       <p class="muted">粘贴 AI 返回的 JSON：</p>
       <textarea class="ta" id="jsonIn" rows="6" placeholder='{"title":"...","paragraphs":[{"en":"...","zh":"..."}]}'></textarea>
       <button class="btn primary" id="renderJson" style="margin-top:10px">渲染文章</button>
-      ${S.settings.apiKey ? '' : '<p class="muted" style="margin-top:12px">小提示：在「设置」里填 API Key 后可一键生成，不用来回复制。</p>'}
     </div>`;
 
   $('#copyPrompt').onclick = async () => {
@@ -823,7 +666,6 @@ async function generateArticle(words){
   }
 }
 
-/* 把中文译文里的 [[单词|释义]] 替换成输入框 */
 function renderZh(zh, pi){
   let i = 0;
   return esc(zh).replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (m, w, mean) => {
@@ -934,6 +776,131 @@ function checkOne(inp){
   }
 
   applyArticleResult(inp.dataset.word, ok);
+}
+
+/* ============================================================
+   词库 & 设置（保持不变）
+============================================================ */
+function renderLib(){
+  const all = Object.values(S.words).sort((a,b) => (b.addedAt||0) - (a.addedAt||0));
+  if(!all.length){
+    $('#view-lib').innerHTML = `<div class="card muted center">词库是空的</div>`;
+    return;
+  }
+  const rows = all.map(w => {
+    const nextTxt = w.stage >= 8 ? '已掌握' : new Date(w.nextReview).toLocaleDateString('zh-CN');
+    return `<div class="li-row">
+      <div class="w">${esc(w.word)}</div>
+      <div class="m">${esc(w.meaning)}</div>
+      <span class="tag ${w.stage >= 8 ? 'master' : ''}">${STAGE_LABEL[w.stage]}</span>
+      <span class="next">${nextTxt}</span>
+      <button class="x" data-del="${esc(w.word)}" title="删除">×</button>
+    </div>`;
+  }).join('');
+
+  $('#view-lib').innerHTML = `<div class="card">
+      <h3>词库（${all.length}）</h3>
+      <p class="muted">阶段 = 记忆曲线进度；右侧为下次复习日期。</p>
+      ${rows}
+    </div>`;
+
+  $$('#view-lib .x').forEach(b => {
+    b.onclick = () => {
+      if(confirm('删除 ' + b.dataset.del + ' ?')){
+        delete S.words[b.dataset.del];
+        save();
+        renderLib();
+      }
+    };
+  });
+}
+
+function renderSettings(){
+  $('#view-settings').innerHTML = `
+    <div class="card">
+      <h3>AI 文章生成（可选）</h3>
+      <p class="muted">填入任意 OpenAI 兼容接口的 Key 后可一键生成文章。<br>
+      不填也能用：系统会给你一段提示词，复制到 DeepSeek / ChatGPT / 豆包 / Kimi，再把返回的 JSON 粘回来即可。</p>
+      <label>API Base</label>
+      <input class="inp" id="sBase" value="${esc(S.settings.apiBase)}">
+      <label>API Key</label>
+      <input class="inp" id="sKey" type="password" value="${esc(S.settings.apiKey)}" placeholder="sk-...">
+      <label>模型</label>
+      <input class="inp" id="sModel" value="${esc(S.settings.model)}" placeholder="deepseek-chat">
+      <button class="btn primary" id="saveSet" style="margin-top:14px">保存</button>
+      <p class="muted" style="margin-top:10px">Key 只存在你自己手机浏览器里，不会上传到 GitHub，别人看不到。</p>
+    </div>
+
+    <div class="card">
+      <h3>数据备份</h3>
+      <p class="muted">换手机或清缓存前记得备份。</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+        <button class="btn" id="exportBtn" style="margin:0">下载备份</button>
+        <button class="btn" id="copyBackup" style="margin:0">复制备份</button>
+        <button class="btn" id="importBtn" style="margin:0">恢复备份</button>
+      </div>
+      <button class="btn danger" id="clearBtn" style="margin-top:12px">清空全部数据</button>
+      <input type="file" id="fileIn" accept="application/json" style="display:none">
+    </div>`;
+
+  $('#saveSet').onclick = () => {
+    S.settings.apiBase = $('#sBase').value.trim() || 'https://api.deepseek.com/v1';
+    S.settings.apiKey  = $('#sKey').value.trim();
+    S.settings.model   = $('#sModel').value.trim() || 'deepseek-chat';
+    save();
+    $('#saveSet').textContent = '已保存 ✓';
+    setTimeout(() => $('#saveSet').textContent = '保存', 1500);
+  };
+
+  $('#exportBtn').onclick = () => {
+    const blob = new Blob([JSON.stringify(S, null, 2)], { type:'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cet6-words-' + todayStr() + '.json';
+    a.click();
+  };
+
+  $('#copyBackup').onclick = async () => {
+    try{
+      await navigator.clipboard.writeText(JSON.stringify(S));
+      alert('备份内容已复制，粘贴到备忘录或发给自己保存');
+    }catch(e){
+      alert('复制失败，请改用「下载备份」');
+    }
+  };
+
+  $('#importBtn').onclick = () => $('#fileIn').click();
+
+  $('#fileIn').onchange = e => {
+    const f = e.target.files[0];
+    if(!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try{
+        const o = JSON.parse(r.result);
+        if(o.words){
+          S.words = o.words;
+          S.settings = Object.assign(S.settings, o.settings || {});
+          save();
+          alert('恢复成功');
+          renderSettings();
+        }else{
+          alert('文件格式不对');
+        }
+      }catch(err){ alert('解析失败'); }
+    };
+    r.readAsText(f);
+  };
+
+  $('#clearBtn').onclick = () => {
+    if(confirm('确定清空所有单词和进度？此操作不可恢复')){
+      try{
+        localStorage.removeItem(DB_KEY);
+        localStorage.removeItem('cet6_tr_cache');
+      }catch(e){}
+      location.reload();
+    }
+  };
 }
 
 /* ============================================================
